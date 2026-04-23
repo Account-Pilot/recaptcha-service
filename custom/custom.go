@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/KakashiHatake324/recaptcha-service"
+	"github.com/Account-Pilot/recaptcha-service"
 )
 
 const (

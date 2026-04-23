@@ -7,10 +7,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/KakashiHatake324/recaptcha-service"
-	"github.com/KakashiHatake324/recaptcha-service/anticaptcha"
-	"github.com/KakashiHatake324/recaptcha-service/capsolver"
-	"github.com/KakashiHatake324/recaptcha-service/custom"
+	"github.com/Account-Pilot/recaptcha-service"
+	"github.com/Account-Pilot/recaptcha-service/anticaptcha"
+	"github.com/Account-Pilot/recaptcha-service/capsolver"
+	"github.com/Account-Pilot/recaptcha-service/custom"
 )
 
 func main() {

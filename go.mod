@@ -1,3 +1,3 @@
-module github.com/KakashiHatake324/recaptcha-service
+module github.com/Account-Pilot/recaptcha-service
 
 go 1.24
