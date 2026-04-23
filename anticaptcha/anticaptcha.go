@@ -118,9 +118,42 @@ type createResp struct {
 	TaskID           int64  `json:"taskId"`
 }
 
+// taskTypeFor translates the library's canonical Type to AntiCaptcha's task
+// type string. AntiCaptcha differs from CapSolver in two ways:
+//   - spelling: "Recaptcha" (single capital) and "Proxyless" (lowercase L)
+//   - V3 Enterprise: expressed as the regular V3 task + isEnterprise:true,
+//     not as a dedicated task type
+//
+// The second return value is whether isEnterprise:true must be appended to
+// the task body (true only for V3 Enterprise variants).
+func taskTypeFor(t recaptcha.Type) (string, bool) {
+	switch t {
+	case recaptcha.V3:
+		return "RecaptchaV3TaskProxyless", false
+	case recaptcha.V3Proxied:
+		return "RecaptchaV3Task", false
+	case recaptcha.V3Enterprise:
+		return "RecaptchaV3TaskProxyless", true
+	case recaptcha.V3EnterpriseProxied:
+		return "RecaptchaV3Task", true
+	case recaptcha.V2:
+		return "RecaptchaV2TaskProxyless", false
+	case recaptcha.V2Proxied:
+		return "RecaptchaV2Task", false
+	case recaptcha.V2Enterprise:
+		return "RecaptchaV2EnterpriseTaskProxyless", false
+	case recaptcha.V2EnterpriseProxied:
+		return "RecaptchaV2EnterpriseTask", false
+	}
+	// Fall back to the raw string; lets callers experiment with task types
+	// we haven't hard-coded yet.
+	return string(t), false
+}
+
 func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (int64, error) {
+	taskType, enterprise := taskTypeFor(t.Type)
 	task := map[string]any{
-		"type":       string(t.Type),
+		"type":       taskType,
 		"websiteURL": t.URL,
 		"websiteKey": t.SiteKey,
 	}
@@ -128,7 +161,7 @@ func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (int64, error
 	if recaptcha.IsV3(t.Type) {
 		task["pageAction"] = t.Action
 		task["minScore"] = t.MinScore
-		if recaptcha.IsEnterprise(t.Type) {
+		if enterprise {
 			task["isEnterprise"] = true
 		}
 	} else {
