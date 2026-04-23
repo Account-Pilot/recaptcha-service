@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Account-Pilot/recaptcha-service"
@@ -30,11 +31,48 @@ type Config struct {
 }
 
 type Client struct {
+	mu  sync.RWMutex // guards cfg.APIKey and cfg.SiteKey
 	cfg Config
 	hc  *http.Client
 }
 
 var _ recaptcha.Solver = (*Client)(nil)
+
+// SetAPIKey rotates the custom-solver API key used for subsequent requests.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetAPIKey(key string) {
+	c.mu.Lock()
+	c.cfg.APIKey = key
+	c.mu.Unlock()
+}
+
+// SetSiteKey rotates the default sitekey used when a Task doesn't set its own.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetSiteKey(key string) {
+	c.mu.Lock()
+	c.cfg.SiteKey = key
+	c.mu.Unlock()
+}
+
+// APIKey returns the current API key.
+func (c *Client) APIKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey
+}
+
+// SiteKey returns the current default sitekey.
+func (c *Client) SiteKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.SiteKey
+}
+
+func (c *Client) keys() (apiKey, siteKey string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey, c.cfg.SiteKey
+}
 
 func New(apiKey, siteKey string) *Client {
 	return NewWithConfig(Config{APIKey: apiKey, SiteKey: siteKey})
@@ -62,8 +100,9 @@ func (c *Client) Solve(ctx context.Context, url string, t recaptcha.Type, action
 }
 
 func (c *Client) SolveTask(ctx context.Context, task recaptcha.Task) (string, error) {
-	c.applyDefaults(&task)
-	if err := validate(c.cfg.APIKey, task); err != nil {
+	apiKey, siteKey := c.keys()
+	c.applyDefaults(&task, siteKey)
+	if err := validate(apiKey, task); err != nil {
 		return "", err
 	}
 
@@ -82,7 +121,7 @@ func (c *Client) SolveTask(ctx context.Context, task recaptcha.Task) (string, er
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.cfg.APIKey)
+	req.Header.Set("x-api-key", apiKey)
 
 	res, err := c.hc.Do(req)
 	if err != nil {
@@ -111,9 +150,9 @@ func (c *Client) SolveTask(ctx context.Context, task recaptcha.Task) (string, er
 	return parsed.Token, nil
 }
 
-func (c *Client) applyDefaults(t *recaptcha.Task) {
+func (c *Client) applyDefaults(t *recaptcha.Task, siteKey string) {
 	if t.SiteKey == "" {
-		t.SiteKey = c.cfg.SiteKey
+		t.SiteKey = siteKey
 	}
 	if t.UserAgent == "" {
 		t.UserAgent = c.cfg.UserAgent

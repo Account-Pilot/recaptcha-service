@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Account-Pilot/recaptcha-service"
@@ -27,11 +28,48 @@ type Config struct {
 }
 
 type Client struct {
+	mu  sync.RWMutex // guards cfg.APIKey and cfg.SiteKey
 	cfg Config
 	hc  *http.Client
 }
 
 var _ recaptcha.Solver = (*Client)(nil)
+
+// SetAPIKey rotates the CapSolver API key used for subsequent requests.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetAPIKey(key string) {
+	c.mu.Lock()
+	c.cfg.APIKey = key
+	c.mu.Unlock()
+}
+
+// SetSiteKey rotates the default sitekey used when a Task doesn't set its own.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetSiteKey(key string) {
+	c.mu.Lock()
+	c.cfg.SiteKey = key
+	c.mu.Unlock()
+}
+
+// APIKey returns the current API key.
+func (c *Client) APIKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey
+}
+
+// SiteKey returns the current default sitekey.
+func (c *Client) SiteKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.SiteKey
+}
+
+func (c *Client) keys() (apiKey, siteKey string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey, c.cfg.SiteKey
+}
 
 func New(apiKey, siteKey string) *Client {
 	return NewWithConfig(Config{APIKey: apiKey, SiteKey: siteKey})
@@ -58,24 +96,25 @@ func (c *Client) Solve(ctx context.Context, url string, t recaptcha.Type, action
 }
 
 func (c *Client) SolveTask(ctx context.Context, task recaptcha.Task) (string, error) {
-	c.applyDefaults(&task)
-	if err := validate(c.cfg.APIKey, task); err != nil {
+	apiKey, siteKey := c.keys()
+	c.applyDefaults(&task, siteKey)
+	if err := validate(apiKey, task); err != nil {
 		return "", err
 	}
 
-	id, token, err := c.createTask(ctx, task)
+	id, token, err := c.createTask(ctx, apiKey, task)
 	if err != nil {
 		return "", err
 	}
 	if token != "" {
 		return token, nil
 	}
-	return c.pollResult(ctx, id)
+	return c.pollResult(ctx, apiKey, id)
 }
 
-func (c *Client) applyDefaults(t *recaptcha.Task) {
+func (c *Client) applyDefaults(t *recaptcha.Task, siteKey string) {
 	if t.SiteKey == "" {
-		t.SiteKey = c.cfg.SiteKey
+		t.SiteKey = siteKey
 	}
 	if t.UserAgent == "" {
 		t.UserAgent = c.cfg.UserAgent
@@ -120,7 +159,7 @@ type createResp struct {
 
 // createTask returns either a taskID to poll, or a pre-computed token when
 // CapSolver resolves the task synchronously.
-func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (taskID, token string, err error) {
+func (c *Client) createTask(ctx context.Context, apiKey string, t recaptcha.Task) (taskID, token string, err error) {
 	task := map[string]any{
 		"type":       string(t.Type),
 		"websiteURL": t.URL,
@@ -141,7 +180,7 @@ func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (taskID, toke
 		task["enterprisePayload"] = map[string]string{"s": t.Action}
 	}
 
-	body, _ := json.Marshal(createBody{ClientKey: c.cfg.APIKey, Task: task})
+	body, _ := json.Marshal(createBody{ClientKey: apiKey, Task: task})
 
 	var resp createResp
 	if err := c.do(ctx, "/createTask", body, &resp); err != nil {
@@ -167,13 +206,13 @@ type resultResp struct {
 	} `json:"solution"`
 }
 
-func (c *Client) pollResult(ctx context.Context, taskID string) (string, error) {
+func (c *Client) pollResult(ctx context.Context, apiKey, taskID string) (string, error) {
 	if taskID == "" {
 		return "", fmt.Errorf("capsolver: missing task id")
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"clientKey": c.cfg.APIKey,
+		"clientKey": apiKey,
 		"taskId":    taskID,
 	})
 

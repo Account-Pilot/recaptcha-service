@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Account-Pilot/recaptcha-service"
@@ -29,11 +30,42 @@ type Config struct {
 }
 
 type Client struct {
+	mu  sync.RWMutex // guards cfg.APIKey and cfg.SiteKey — the only fields mutable after construction
 	cfg Config
 	hc  *http.Client
 }
 
 var _ recaptcha.Solver = (*Client)(nil)
+
+// SetAPIKey rotates the AntiCaptcha API key used for subsequent requests.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetAPIKey(key string) {
+	c.mu.Lock()
+	c.cfg.APIKey = key
+	c.mu.Unlock()
+}
+
+// SetSiteKey rotates the default sitekey used when a Task doesn't set its own.
+// Safe to call concurrently with Solve/SolveTask.
+func (c *Client) SetSiteKey(key string) {
+	c.mu.Lock()
+	c.cfg.SiteKey = key
+	c.mu.Unlock()
+}
+
+// APIKey returns the current API key.
+func (c *Client) APIKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey
+}
+
+// SiteKey returns the current default sitekey.
+func (c *Client) SiteKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.SiteKey
+}
 
 // New builds a Client with the minimum required settings.
 func New(apiKey, siteKey string) *Client {
@@ -66,21 +98,31 @@ func (c *Client) Solve(ctx context.Context, url string, t recaptcha.Type, action
 // SolveTask runs an arbitrary Task. Missing fields fall back to the client
 // configuration.
 func (c *Client) SolveTask(ctx context.Context, task recaptcha.Task) (string, error) {
-	c.applyDefaults(&task)
-	if err := validate(c.cfg.APIKey, task); err != nil {
+	apiKey, siteKey := c.keys()
+	c.applyDefaults(&task, siteKey)
+	if err := validate(apiKey, task); err != nil {
 		return "", err
 	}
 
-	id, err := c.createTask(ctx, task)
+	id, err := c.createTask(ctx, apiKey, task)
 	if err != nil {
 		return "", err
 	}
-	return c.pollResult(ctx, id)
+	return c.pollResult(ctx, apiKey, id)
 }
 
-func (c *Client) applyDefaults(t *recaptcha.Task) {
+// keys takes a single read-lock snapshot of the mutable API/site keys so the
+// rest of a single Solve call sees a consistent pair even if another
+// goroutine rotates them mid-flight.
+func (c *Client) keys() (apiKey, siteKey string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.APIKey, c.cfg.SiteKey
+}
+
+func (c *Client) applyDefaults(t *recaptcha.Task, siteKey string) {
 	if t.SiteKey == "" {
-		t.SiteKey = c.cfg.SiteKey
+		t.SiteKey = siteKey
 	}
 	if t.UserAgent == "" {
 		t.UserAgent = c.cfg.UserAgent
@@ -150,7 +192,7 @@ func taskTypeFor(t recaptcha.Type) (string, bool) {
 	return string(t), false
 }
 
-func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (int64, error) {
+func (c *Client) createTask(ctx context.Context, apiKey string, t recaptcha.Task) (int64, error) {
 	taskType, enterprise := taskTypeFor(t.Type)
 	task := map[string]any{
 		"type":       taskType,
@@ -176,7 +218,7 @@ func (c *Client) createTask(ctx context.Context, t recaptcha.Task) (int64, error
 		}
 	}
 
-	body, _ := json.Marshal(createBody{ClientKey: c.cfg.APIKey, Task: task})
+	body, _ := json.Marshal(createBody{ClientKey: apiKey, Task: task})
 
 	var resp createResp
 	if err := c.do(ctx, "/createTask", body, &resp); err != nil {
@@ -198,9 +240,9 @@ type resultResp struct {
 	} `json:"solution"`
 }
 
-func (c *Client) pollResult(ctx context.Context, taskID int64) (string, error) {
+func (c *Client) pollResult(ctx context.Context, apiKey string, taskID int64) (string, error) {
 	body, _ := json.Marshal(map[string]any{
-		"clientKey": c.cfg.APIKey,
+		"clientKey": apiKey,
 		"taskId":    taskID,
 	})
 
