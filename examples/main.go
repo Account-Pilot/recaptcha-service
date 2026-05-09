@@ -18,7 +18,7 @@ func main() {
 	defer cancel()
 
 	targetURL := "https://volatix.io/login"
-	siteKey := "6Lda_posAAAAAHnjENcIafEQIS88K2FIzWNoaxwl"
+	siteKey := "6Lda_posAAAAAHnjENcIafEQIS88K2FIzWNoaxwl "
 	action := "login"
 	captchaType := recaptcha.V3Enterprise
 
